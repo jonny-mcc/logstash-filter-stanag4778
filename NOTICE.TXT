@@ -1,0 +1,5 @@
+Logstash STANAG 4778 Filter Plugin
+Copyright 2026 Logstash Plugin Contributors
+
+This product includes software developed by The Apache Software
+Foundation (http://www.apache.org/).

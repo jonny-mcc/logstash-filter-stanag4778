@@ -1,0 +1,18 @@
+{
+  "ID": "39CA2939-38C0-4C4E-AE6C-CFA5172B8CEB",
+  "name": "Doe",
+  "first-name": "John",
+  "age": 25,
+  "hobbies": [
+    "reading",
+    "cinema"
+  ],
+  "bdo": {
+    "typ": "urn:nato:stanag:4778:bindingInformation:1:0",
+    "bdis": [
+      {
+        "bdi": "ew0KICAiYWxnIjogIm5vbmUiLA0KICAiY3R5IjogInZuZC5uYXRvLmJpbmRpbmdkYXRhb2JqZWN0K2pzb24iDQp9.ewogICJtYnMiOiBbCiAgICB7CiAgICAgICJtZHMiOiB7CiAgICAgICAgIkBjb250ZXh0IjogewogICAgICAgICAgIkBiYXNlIjogInVybjpuYXRvOnN0YW5hZzo1NjM2OkE6MTplbGVtZW50czpqc29uIgogICAgICAgIH0sCiAgICAgICAgIm9jbCI6IHsKICAgICAgICAgICJwb2wiOiAiQUNNRSIsCiAgICAgICAgICAiY2xzIjogIklOVEVSTkFMIiwKICAgICAgICAgICJkY3IiOiAiMjAyMS0wOS0yN1QxNzowMjoyNy44NTZaIiwKICAgICAgICAgICJkcnYiOiAiMjAyNi0wOS0yN1QxNzowMjoyNy44NTZaIgogICAgICAgIH0KICAgICAgfSwKICAgICAgImR0cnMiOiBbCiAgICAgICAgewogICAgICAgICAgImN0eSI6ICJqc29uIiwKICAgICAgICAgICJ1cmkiOiAiIgogICAgICAgIH0KICAgICAgXQogICAgfQogIF0KfQ."
+      }
+    ]
+  }
+}

@@ -1,0 +1,147 @@
+:plugin: stanag4778
+:type: filter
+
+== Logstash STANAG 4778 Filter Plugin
+
+The `stanag4778` filter parses and validates NATO STANAG 4778 Binding Data Objects (BDOs) in both XML (ADatP-4778 / ADatP-4778.2) and JSON (ADatP-4778.7) formats.
+
+It supports:
+* Parsing encapsulating, embedded, and detached Binding Data Objects (BDOs).
+* Cryptographic signature verification using XMLDSIG (RSA, ECDSA, HMAC) compliant with ADatP-4778.2 profile rules.
+* Cryptographic signature verification using JSON Web Signatures (JWS Compact Serialization) compliant with ADatP-4778.7.
+* Extraction of STANAG 4774 Confidentiality Metadata Labels (both XML `slab:originatorConfidentialityLabel` and JSON `ocl`/`acl`).
+* Evaluation of same-document references using JSON Pointer (RFC 6901), JSONPath (RFC 9535), and JMESPath with RFC 8785 JSON Canonicalization Scheme (JCS).
+* Optional HTTPS fetching for detached references against an explicit hostname allowlist.
+* Complete Java Cryptography Architecture (JCA) integration with no external native C extensions or vendored JAR dependencies.
+
+[id="plugins-{type}s-{plugin}-example"]
+=== Example: Verifying XML BDOs with Pinned Certificates
+
+[source,ruby]
+----------------------------------
+filter {
+  stanag4778 {
+    source => "message"
+    target => "stanag"
+    trusted_certificates => ["/etc/pki/nato-originator.pem"]
+    require_signature => true
+    strict_profile => true
+  }
+}
+----------------------------------
+
+=== Example: Verifying JSON BDOs with HMAC Secrets
+
+[source,ruby]
+----------------------------------
+filter {
+  stanag4778 {
+    source => "message"
+    target => "stanag"
+    hmac_keys => {
+      "key-01" => "${STANAG_HMAC_SECRET}"
+    }
+    require_signature => true
+  }
+}
+----------------------------------
+
+[id="plugins-{type}s-{plugin}-options"]
+=== STANAG 4778 Filter Configuration Options
+
+[cols="<,<,<",options="header",]
+|=======================================================================
+|Setting |Input type|Required
+| <<plugins-{type}s-{plugin}-source>> |<<string,string>>|Yes
+| <<plugins-{type}s-{plugin}-target>> |<<string,string>>|No
+| <<plugins-{type}s-{plugin}-format>> |<<string,string>>|No
+| <<plugins-{type}s-{plugin}-require_signature>> |<<boolean,boolean>>|No
+| <<plugins-{type}s-{plugin}-strict_profile>> |<<boolean,boolean>>|No
+| <<plugins-{type}s-{plugin}-validate_schema>> |<<boolean,boolean>>|No
+| <<plugins-{type}s-{plugin}-ssl_certificate_authorities>> |<<path,path>>|No
+| <<plugins-{type}s-{plugin}-trusted_certificates>> |<<array,array>>|No
+| <<plugins-{type}s-{plugin}-jwks_path>> |<<path,path>>|No
+| <<plugins-{type}s-{plugin}-hmac_keys>> |<<hash,hash>>|No
+| <<plugins-{type}s-{plugin}-clock_skew>> |<<number,number>>|No
+| <<plugins-{type}s-{plugin}-max_signature_age>> |<<number,number>>|No
+| <<plugins-{type}s-{plugin}-json_bdo_field>> |<<string,string>>|No
+| <<plugins-{type}s-{plugin}-json_uri_profile>> |<<string,string>>|No
+| <<plugins-{type}s-{plugin}-fetch_external_references>> |<<boolean,boolean>>|No
+| <<plugins-{type}s-{plugin}-external_reference_allowlist>> |<<array,array>>|No
+| <<plugins-{type}s-{plugin}-fetch_timeout>> |<<number,number>>|No
+| <<plugins-{type}s-{plugin}-fetch_max_bytes>> |<<number,number>>|No
+| <<plugins-{type}s-{plugin}-extract_labels>> |<<boolean,boolean>>|No
+|=======================================================================
+
+==== `source`
+* Value type is <<string,string>>
+* Default value is `nil`
+* This setting is required.
+
+Field containing the XML document or JSON object to parse and verify.
+
+==== `target`
+* Value type is <<string,string>>
+* Default value is `"stanag4778"`
+
+The target field where verification details, signature status, and extracted labels will be written.
+
+==== `format`
+* Value type is <<string,string>>
+* Permitted values: `"auto"`, `"xml"`, `"json"`
+* Default value is `"auto"`
+
+Input syntax detection. `"auto"` sniffs the payload format based on opening characters (`<` vs `{`/`[`).
+
+==== `require_signature`
+* Value type is <<boolean,boolean>>
+* Default value is `true`
+
+When true, unsigned BDOs (or JWS with `alg: "none"`) are marked `valid: false` and tagged with `_stanag4778_unsigned` and `_stanag4778_invalid`.
+
+==== `strict_profile`
+* Value type is <<boolean,boolean>>
+* Default value is `true`
+
+Enforces strict compliance with NATO ADatP-4778.2 and ADatP-4778.7 profile rules:
+* Prohibits legacy weak algorithms (`sha1`, `md5`, `dsa-sha1`, etc.).
+* Enforces required headers (`cty: "vnd.nato.bindingdataobject+json"`, non-empty `crit` lists).
+* Enforces presence of XML `<wsu:TimeStamp>` with `<wsu:Created>`.
+
+==== `ssl_certificate_authorities`
+* Value type is <<path,path>>
+* Default value is `nil`
+
+Path to a PEM bundle of trusted Root and Intermediate Certificate Authorities for PKIX certificate chain validation.
+
+==== `trusted_certificates`
+* Value type is <<array,array>>
+* Default value is `[]`
+
+List of paths to pinned X.509 signer certificates in PEM format.
+
+==== `hmac_keys`
+* Value type is <<hash,hash>>
+* Default value is `{}`
+
+Mapping of HMAC Key Identifier (`kid` or `KeyName`) to secret strings. Values support environment variable expansion via `${VAR_NAME}`.
+
+==== `fetch_external_references`
+* Value type is <<boolean,boolean>>
+* Default value is `false`
+
+When enabled, detached references (`DataReference` or `MetadataReference`) with external HTTPS URLs are retrieved and verified against the declared digest hash.
+
+==== `external_reference_allowlist`
+* Value type is <<array,array>>
+* Default value is `[]`
+
+Required when `fetch_external_references` is true. Specifies exact hostnames or wildcard patterns (e.g., `*.nato.int`) permitted for external fetching.
+
+[id="plugins-{type}s-{plugin}-tags"]
+=== Tags Added on Failure
+
+* `_stanag4778_parse_failure`: The payload could not be parsed as valid XML or JSON, or an XML external entity (XXE) attempt was rejected.
+* `_stanag4778_invalid`: Cryptographic signature verification failed, a reference hash mismatched, or an ADatP profile constraint was violated.
+* `_stanag4778_unsigned`: The BDO is unsigned or has `alg: "none"` while `require_signature => true`.
+* `_stanag4778_unresolved_reference`: A detached external reference could not be fetched (disabled, host not in allowlist, or network timeout).

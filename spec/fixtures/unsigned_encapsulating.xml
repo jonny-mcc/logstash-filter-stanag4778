@@ -1,0 +1,19 @@
+<mb:BindingInformation xmlns:mb="urn:nato:stanag:4778:bindinginformation:1:0"
+                       xmlns:xmime="http://www.w3.org/2005/05/xmlmime">
+  <mb:MetadataBindingContainer>
+    <mb:MetadataBinding Id="mb-1">
+      <mb:Metadata>
+        <slab:originatorConfidentialityLabel xmlns:slab="urn:nato:stanag:4774:confidentialitymetadatalabel:1:0">
+          <slab:ConfidentialityInformation>
+            <slab:PolicyIdentifier>ACME</slab:PolicyIdentifier>
+            <slab:Classification>CONFIDENTIAL</slab:Classification>
+          </slab:ConfidentialityInformation>
+          <slab:CreationDateTime>2026-10-06T12:00:00Z</slab:CreationDateTime>
+        </slab:originatorConfidentialityLabel>
+      </mb:Metadata>
+      <mb:Data xmime:contentType="text/plain">
+        Protected content inside encapsulating BDO
+      </mb:Data>
+    </mb:MetadataBinding>
+  </mb:MetadataBindingContainer>
+</mb:BindingInformation>
