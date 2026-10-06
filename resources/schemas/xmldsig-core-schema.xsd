@@ -110,6 +110,8 @@
 
   <element name="KeyName" type="string"/>
   <element name="MgmtData" type="string"/>
+  <element name="PGPData" type="string"/>
+  <element name="SPKIData" type="string"/>
 
   <element name="KeyValue" type="ds:KeyValueType"/>
   <complexType name="KeyValueType" mixed="true">

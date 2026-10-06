@@ -87,6 +87,7 @@ module LogStash
           all_bindings = []
           all_valid = true
           has_unresolved = false
+          all_signed = true
           any_signed = false
 
           bdis.each_with_index do |bdi_obj, idx|
@@ -94,6 +95,7 @@ module LogStash
             unless jws_str.is_a?(String)
               errors << "bdis[#{idx}] 'bdi' member is not a string"
               all_valid = false
+              all_signed = false
               next
             end
 
@@ -101,16 +103,27 @@ module LogStash
             signatures_res << sig_res
             all_bindings.concat(bindings_res)
 
-            any_signed = true if sig_res[:signed]
+            if sig_res[:signed]
+              any_signed = true
+            else
+              all_signed = false
+            end
             all_valid = false unless sig_res[:valid]
+
+            if sig_res[:errors]&.any?
+              errors.concat(sig_res[:errors])
+            end
+            if sig_res[:warnings]&.any?
+              warnings.concat(sig_res[:warnings])
+            end
 
             if sig_res[:references]&.any? { |r| r[:status] == :unresolved }
               has_unresolved = true
             end
           end
 
-          if !any_signed && @require_signature
-            errors << "Payload contains no cryptographic signatures but 'require_signature' is enabled"
+          if @require_signature && (!all_signed || bdis.empty?)
+            errors << "Payload contains unsigned BDO entries but 'require_signature' is enabled"
             all_valid = false
           end
 
@@ -190,8 +203,17 @@ module LogStash
           }
 
           # 1. Header checks
-          alg = (header_json["alg"] || "none").to_s
+          unless header_json.key?("alg")
+            errors << "JWS protected header is missing mandatory 'alg' parameter"
+            alg = "missing"
+          else
+            alg = header_json["alg"].to_s
+          end
           sig_info[:algorithm] = alg
+
+          unless Profile::JWS_ALGORITHMS.key?(alg)
+            errors << "JWS 'alg' parameter '#{alg}' is not in permitted algorithms list"
+          end
 
           # ADatP-4778.7 Section 1.4.1.1.1: cty MUST be "vnd.nato.bindingdataobject+json"
           cty = header_json["cty"].to_s
@@ -209,8 +231,12 @@ module LogStash
               errors << "JWS 'crit' header must be a non-empty array"
             else
               crit.each do |param|
-                unless header_json.key?(param.to_s)
-                  errors << "Critical header parameter '#{param}' declared in 'crit' is missing from header"
+                p_str = param.to_s
+                unless header_json.key?(p_str)
+                  errors << "Critical header parameter '#{p_str}' declared in 'crit' is missing from header"
+                end
+                unless Profile::JWS_UNDERSTOOD_HEADER_PARAMS.include?(p_str)
+                  errors << "Unrecognized critical header parameter '#{p_str}' declared in 'crit'"
                 end
               end
             end
@@ -219,7 +245,7 @@ module LogStash
           # iat check
           iat = header_json["iat"]
           sig_info[:iat] = iat
-          is_signed = alg != "none"
+          is_signed = alg != "none" && alg != "missing"
           sig_info[:signed] = is_signed
 
           if is_signed
@@ -252,6 +278,7 @@ module LogStash
           # 3. Reference validation
           ref_results = []
           bindings = []
+          expected_hash = Profile::JWS_ALG_TO_HASH[alg]
 
           mbs = payload_json["mbs"]
           if mbs.is_a?(Array)
@@ -269,7 +296,9 @@ module LogStash
                   dtr,
                   root_doc: root_doc || payload_json,
                   bdo_field: @bdo_field,
-                  uri_profile: @default_profile
+                  uri_profile: @default_profile,
+                  is_signed: is_signed,
+                  expected_hash_alg: expected_hash
                 )
                 ref_results << ref_res
                 binding_entry[:data_references] << ref_res
@@ -285,7 +314,9 @@ module LogStash
                   mdr,
                   root_doc: root_doc || payload_json,
                   bdo_field: @bdo_field,
-                  uri_profile: @default_profile
+                  uri_profile: @default_profile,
+                  is_signed: is_signed,
+                  expected_hash_alg: expected_hash
                 )
                 ref_results << ref_res
                 if ref_res[:status] == :mismatch || ref_res[:status] == :error
@@ -298,6 +329,7 @@ module LogStash
           end
 
           sig_info[:valid] = crypto_valid && errors.empty?
+          sig_info[:revocation_checked] = (@trust_store.revocation_mode != "none")
           sig_info[:errors] = errors
           sig_info[:warnings] = warnings
           sig_info[:references] = ref_results
@@ -323,10 +355,6 @@ module LogStash
         def verify_mac(alg, header, input_bytes, sig_bytes)
           kid = header["kid"]
           secret_bytes = @trust_store.hmac_secret(kid)
-
-          if secret_bytes.nil? && header.key?("jwk") && header["jwk"]["kty"] == "oct"
-            secret_bytes = @trust_store.parse_jwk_key(header["jwk"])
-          end
 
           return [false, "No HMAC secret found for key ID '#{kid}'"] if secret_bytes.nil?
 
@@ -395,6 +423,8 @@ module LogStash
 
             # Check if leaf is pinned
             if @trust_store.trusted_pinned_cert?(leaf)
+              ok, err = @trust_store.validate_signer_policy(leaf)
+              return [nil, "Pinned certificate policy check failed: #{err}"] unless ok
               return [leaf.getPublicKey, nil]
             end
 
@@ -413,7 +443,11 @@ module LogStash
             match = @trust_store.trusted_certs.find do |c|
               @trust_store.sha256_thumbprint_b64url(c) == target_thumb
             end
-            return [match.getPublicKey, nil] if match
+            if match
+              ok, err = @trust_store.validate_signer_policy(match)
+              return [nil, "Pinned certificate policy check failed: #{err}"] unless ok
+              return [match.getPublicKey, nil]
+            end
           end
 
           if header["x5t"]
@@ -421,13 +455,33 @@ module LogStash
             match = @trust_store.trusted_certs.find do |c|
               @trust_store.sha1_thumbprint_b64url(c) == target_thumb
             end
-            return [match.getPublicKey, nil] if match
+            if match
+              ok, err = @trust_store.validate_signer_policy(match)
+              return [nil, "Pinned certificate policy check failed: #{err}"] unless ok
+              return [match.getPublicKey, nil]
+            end
           end
 
-          # 4. Embedded jwk
+          # 4. Embedded jwk - only accepted if it matches pre-configured trusted keys
           if header["jwk"] && header["jwk"].is_a?(Hash)
-            key = @trust_store.send(:parse_jwk_key, header["jwk"])
-            return [key, nil] if key
+            jwk = header["jwk"]
+            if jwk["kty"] == "oct"
+              return [nil, "Embedded symmetric 'oct' JWK in protected header is prohibited"]
+            end
+            parsed_key = @trust_store.send(:parse_jwk_key, jwk)
+            if parsed_key && @trust_store.trusted_public_key?(parsed_key)
+              return [parsed_key, nil]
+            elsif parsed_key
+              return [nil, "Embedded JWK public key does not match any configured trusted certificate or JWKS key"]
+            end
+          end
+
+          if header["jku"]
+            return [nil, "Fetching public keys from 'jku' is unsupported; configure jwks_path instead"]
+          end
+
+          if header["x5u"]
+            return [nil, "Fetching certificates from 'x5u' is unsupported; configure trusted_certificates or ssl_certificate_authorities instead"]
           end
 
           [nil, "Unable to resolve trusted public key for signature verification"]

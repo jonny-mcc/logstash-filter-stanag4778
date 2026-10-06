@@ -20,21 +20,58 @@ module LogStash
 
         # Resolves and validates a DataRef or MetadataRef object
         # Returns a hash { uri:, status: (:valid|:mismatch|:unresolved|:unsupported|:error), message:, cty: }
-        def verify_reference(ref, root_doc:, bdo_field: "bdo", uri_profile: "auto")
+        def verify_reference(ref, root_doc:, bdo_field: "bdo", uri_profile: "auto", is_signed: false, expected_hash_alg: nil)
           uri_str = ref["uri"].to_s
           cty     = ref["cty"].to_s
           hash_b64= ref["hash"]
-          alg     = (ref["alg"] || "sha-256").to_s.downcase
+          alg     = ref["alg"]&.to_s&.downcase
 
-          # Unsigned reference (non-cryptographic BDO)
-          if hash_b64.nil? || hash_b64.empty?
-            return {
-              uri: uri_str,
-              cty: cty,
-              status: :valid,
-              message: "Unsigned reference (no hash required)"
-            }
+          if is_signed
+            if hash_b64.nil? || hash_b64.to_s.strip.empty?
+              return {
+                uri: uri_str,
+                cty: cty,
+                status: :error,
+                message: "Cryptographically protected reference is missing mandatory 'hash' parameter"
+              }
+            end
+            if alg.nil? || alg.strip.empty?
+              return {
+                uri: uri_str,
+                cty: cty,
+                status: :error,
+                message: "Cryptographically protected reference is missing mandatory 'alg' parameter"
+              }
+            end
+            if cty.strip.empty?
+              return {
+                uri: uri_str,
+                cty: cty,
+                status: :error,
+                message: "Cryptographically protected reference is missing mandatory 'cty' parameter"
+              }
+            end
+            if expected_hash_alg && alg != expected_hash_alg
+              return {
+                uri: uri_str,
+                cty: cty,
+                status: :error,
+                message: "Reference hash algorithm '#{alg}' does not match JWS algorithm expected hash '#{expected_hash_alg}'"
+              }
+            end
+          else
+            # Unsigned reference (non-cryptographic BDO)
+            if hash_b64.nil? || hash_b64.to_s.strip.empty?
+              return {
+                uri: uri_str,
+                cty: cty,
+                status: :valid,
+                message: "Unsigned reference (no hash required)"
+              }
+            end
           end
+
+          alg ||= "sha-256"
 
           data_bytes = nil
           is_json = cty.empty? || cty.downcase.include?("json")

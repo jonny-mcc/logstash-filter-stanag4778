@@ -9,10 +9,19 @@ It supports:
 * Parsing encapsulating, embedded, and detached Binding Data Objects (BDOs).
 * Cryptographic signature verification using XMLDSIG (RSA, ECDSA, HMAC) compliant with ADatP-4778.2 profile rules.
 * Cryptographic signature verification using JSON Web Signatures (JWS Compact Serialization) compliant with ADatP-4778.7.
+* Fail-closed trust decision model: public keys or HMAC secrets transmitted inside message headers or bodies are never trusted unless they match pre-configured trust material.
 * Extraction of STANAG 4774 Confidentiality Metadata Labels (both XML `slab:originatorConfidentialityLabel` and JSON `ocl`/`acl`).
 * Evaluation of same-document references using JSON Pointer (RFC 6901), JSONPath (RFC 9535), and JMESPath with RFC 8785 JSON Canonicalization Scheme (JCS).
-* Optional HTTPS fetching for detached references against an explicit hostname allowlist.
-* Complete Java Cryptography Architecture (JCA) integration with no external native C extensions or vendored JAR dependencies.
+* Hardened HTTPS fetching for detached references against an explicit hostname allowlist, with SSRF protection (loopback/private IP blocking and manual redirect re-validation).
+* Java Cryptography Architecture (JCA) integration with no external native C extensions or vendored JAR dependencies.
+
+[id="plugins-{type}s-{plugin}-trust-model"]
+=== Trust Model
+
+To protect against forged signatures, the filter enforces a strict **fail-closed trust model**:
+1. **Never Trust Embedded Keys Directly**: An attacker can sign a payload with their own key and place that key in the JWS `jwk` header or the XMLDSIG `<ds:KeyValue>` element. The filter will reject any embedded key unless it matches a pre-configured trusted certificate, a key in `jwks_path`, or a key in `hmac_keys`.
+2. **Symmetric Keys**: Symmetric `oct` JWKs in JWS headers are explicitly prohibited. HMAC secrets must be configured via `hmac_keys` on the verifier side.
+3. **Certificate Policy**: Signer certificates must be within their valid lifetime and have digital signature capabilities. Optional subject name whitelisting (`allowed_signer_subjects`), Extended Key Usage requirements (`required_extended_key_usage`), and PKIX revocation checking (`revocation_mode`) can be enforced.
 
 [id="plugins-{type}s-{plugin}-example"]
 === Example: Verifying XML BDOs with Pinned Certificates
@@ -60,6 +69,9 @@ filter {
 | <<plugins-{type}s-{plugin}-validate_schema>> |<<boolean,boolean>>|No
 | <<plugins-{type}s-{plugin}-ssl_certificate_authorities>> |<<path,path>>|No
 | <<plugins-{type}s-{plugin}-trusted_certificates>> |<<array,array>>|No
+| <<plugins-{type}s-{plugin}-revocation_mode>> |<<string,string>>|No
+| <<plugins-{type}s-{plugin}-required_extended_key_usage>> |<<array,array>>|No
+| <<plugins-{type}s-{plugin}-allowed_signer_subjects>> |<<array,array>>|No
 | <<plugins-{type}s-{plugin}-jwks_path>> |<<path,path>>|No
 | <<plugins-{type}s-{plugin}-hmac_keys>> |<<hash,hash>>|No
 | <<plugins-{type}s-{plugin}-clock_skew>> |<<number,number>>|No
@@ -68,8 +80,12 @@ filter {
 | <<plugins-{type}s-{plugin}-json_uri_profile>> |<<string,string>>|No
 | <<plugins-{type}s-{plugin}-fetch_external_references>> |<<boolean,boolean>>|No
 | <<plugins-{type}s-{plugin}-external_reference_allowlist>> |<<array,array>>|No
+| <<plugins-{type}s-{plugin}-fetch_allow_private_addresses>> |<<boolean,boolean>>|No
 | <<plugins-{type}s-{plugin}-fetch_timeout>> |<<number,number>>|No
 | <<plugins-{type}s-{plugin}-fetch_max_bytes>> |<<number,number>>|No
+| <<plugins-{type}s-{plugin}-fetch_cache_max_bytes>> |<<number,number>>|No
+| <<plugins-{type}s-{plugin}-fetch_cache_ttl>> |<<number,number>>|No
+| <<plugins-{type}s-{plugin}-fetch_ssl_certificate_authorities>> |<<path,path>>|No
 | <<plugins-{type}s-{plugin}-extract_labels>> |<<boolean,boolean>>|No
 |=======================================================================
 
@@ -105,8 +121,10 @@ When true, unsigned BDOs (or JWS with `alg: "none"`) are marked `valid: false` a
 
 Enforces strict compliance with NATO ADatP-4778.2 and ADatP-4778.7 profile rules:
 * Prohibits legacy weak algorithms (`sha1`, `md5`, `dsa-sha1`, etc.).
-* Enforces required headers (`cty: "vnd.nato.bindingdataobject+json"`, non-empty `crit` lists).
+* Enforces required headers (`cty: "vnd.nato.bindingdataobject+json"`).
+* If `crit` is present, enforces that it is non-empty, all listed parameters exist in the header, and all parameters belong to recognized STANAG 4778.7 parameters.
 * Enforces presence of XML `<wsu:TimeStamp>` with `<wsu:Created>`.
+* Enforces enveloped-BDO XPath transforms for embedded XML BDOs.
 
 ==== `ssl_certificate_authorities`
 * Value type is <<path,path>>
@@ -120,11 +138,30 @@ Path to a PEM bundle of trusted Root and Intermediate Certificate Authorities fo
 
 List of paths to pinned X.509 signer certificates in PEM format.
 
+==== `revocation_mode`
+* Value type is <<string,string>>
+* Permitted values: `"none"`, `"crl"`, `"ocsp"`
+* Default value is `"none"`
+
+Enables PKIX revocation checking using CRLs or OCSP responders. When set to `"none"`, certificate revocation is not checked over the network, and the event records `"revocation_checked" => false`.
+
+==== `required_extended_key_usage`
+* Value type is <<array,array>>
+* Default value is `[]`
+
+Array of Extended Key Usage (EKU) OIDs required to be present on the signer certificate (e.g. `["1.3.6.1.5.5.7.3.3"]` for Code/Content Signing).
+
+==== `allowed_signer_subjects`
+* Value type is <<array,array>>
+* Default value is `[]`
+
+List of regular expressions matched against the signer certificate subject Distinguished Name (DN).
+
 ==== `hmac_keys`
 * Value type is <<hash,hash>>
 * Default value is `{}`
 
-Mapping of HMAC Key Identifier (`kid` or `KeyName`) to secret strings. Values support environment variable expansion via `${VAR_NAME}`.
+Mapping of HMAC Key Identifier (`kid` or `KeyName`) to secret strings.
 
 ==== `fetch_external_references`
 * Value type is <<boolean,boolean>>
@@ -136,7 +173,12 @@ When enabled, detached references (`DataReference` or `MetadataReference`) with 
 * Value type is <<array,array>>
 * Default value is `[]`
 
-Required when `fetch_external_references` is true. Specifies exact hostnames or wildcard patterns (e.g., `*.nato.int`) permitted for external fetching.
+Required when `fetch_external_references` is true. Specifies exact hostnames or wildcard patterns (e.g., `*.nato.int` matching subdomains) permitted for external fetching.
+
+[NOTE]
+====
+**DNS Rebinding Considerations**: The filter verifies resolved IP addresses prior to initiating HTTP requests to block loopback and private ranges. However, in environments subject to active DNS rebinding adversaries, configuring local forward proxies or pin-point firewall egress controls is recommended.
+====
 
 [id="plugins-{type}s-{plugin}-tags"]
 === Tags Added on Failure
@@ -144,4 +186,4 @@ Required when `fetch_external_references` is true. Specifies exact hostnames or 
 * `_stanag4778_parse_failure`: The payload could not be parsed as valid XML or JSON, or an XML external entity (XXE) attempt was rejected.
 * `_stanag4778_invalid`: Cryptographic signature verification failed, a reference hash mismatched, or an ADatP profile constraint was violated.
 * `_stanag4778_unsigned`: The BDO is unsigned or has `alg: "none"` while `require_signature => true`.
-* `_stanag4778_unresolved_reference`: A detached external reference could not be fetched (disabled, host not in allowlist, or network timeout).
+* `_stanag4778_unresolved_reference`: A detached external reference could not be fetched (disabled, host not in allowlist, network timeout, or private IP blocked).

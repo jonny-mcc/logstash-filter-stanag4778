@@ -79,7 +79,13 @@ describe LogStash::Filters::Stanag4778 do
     end
 
     context "with valid HMAC signature (HS256)" do
+      let(:doc_body) { { "messageId" => "MSG-100" } }
+
       let(:payload) do
+        canonical = LogStash::Filters::Stanag4778Module::JCS.canonicalize(doc_body)
+        md = java.security.MessageDigest.getInstance("SHA-256")
+        hash_b64 = Base64.urlsafe_encode64(String.from_java_bytes(md.digest(canonical.encode("UTF-8").to_java_bytes))).tr("=", "")
+
         {
           "mbs" => [
             {
@@ -88,7 +94,7 @@ describe LogStash::Filters::Stanag4778 do
                 "ocl" => { "pol" => "NATO", "cls" => "SECRET" }
               },
               "dtrs" => [
-                { "cty" => "json", "uri" => "" }
+                { "cty" => "json", "uri" => "", "hash" => hash_b64, "alg" => "sha-256" }
               ]
             }
           ]
@@ -124,7 +130,10 @@ describe LogStash::Filters::Stanag4778 do
         )
         filt.register
 
-        event = LogStash::Event.new("message" => JSON.generate(signed_bdo))
+        full_doc = doc_body.dup
+        full_doc["bdo"] = signed_bdo
+
+        event = LogStash::Event.new("message" => JSON.generate(full_doc))
         filt.filter(event)
 
         expect(event.get("tags")).to be_nil
@@ -141,11 +150,14 @@ describe LogStash::Filters::Stanag4778 do
         )
         filt.register
 
+        full_doc = doc_body.dup
+        full_doc["bdo"] = signed_bdo
+
         # Tamper payload
-        tampered = Marshal.load(Marshal.dump(signed_bdo))
-        parts = tampered["bdis"][0]["bdi"].split(".")
+        tampered = Marshal.load(Marshal.dump(full_doc))
+        parts = tampered["bdo"]["bdis"][0]["bdi"].split(".")
         parts[2] = parts[2][0..-4] + "xyz"
-        tampered["bdis"][0]["bdi"] = parts.join(".")
+        tampered["bdo"]["bdis"][0]["bdi"] = parts.join(".")
 
         event = LogStash::Event.new("message" => JSON.generate(tampered))
         filt.filter(event)
@@ -156,7 +168,13 @@ describe LogStash::Filters::Stanag4778 do
     end
 
     context "with valid RSA signature and pinned certificate" do
+      let(:rsa_doc_body) { { "reportId" => "REP-200" } }
+
       let(:payload) do
+        canonical = LogStash::Filters::Stanag4778Module::JCS.canonicalize(rsa_doc_body)
+        md = java.security.MessageDigest.getInstance("SHA-256")
+        hash_b64 = Base64.urlsafe_encode64(String.from_java_bytes(md.digest(canonical.encode("UTF-8").to_java_bytes))).tr("=", "")
+
         {
           "mbs" => [
             {
@@ -165,7 +183,7 @@ describe LogStash::Filters::Stanag4778 do
                 "ocl" => { "pol" => "NATO", "cls" => "TOP SECRET" }
               },
               "dtrs" => [
-                { "cty" => "json", "uri" => "" }
+                { "cty" => "json", "uri" => "", "hash" => hash_b64, "alg" => "sha-256" }
               ]
             }
           ]
@@ -189,7 +207,10 @@ describe LogStash::Filters::Stanag4778 do
         )
         filt.register
 
-        event = LogStash::Event.new("message" => JSON.generate(signed_bdo))
+        full_doc = rsa_doc_body.dup
+        full_doc["bdo"] = signed_bdo
+
+        event = LogStash::Event.new("message" => JSON.generate(full_doc))
         filt.filter(event)
 
         expect(event.get("tags")).to be_nil
@@ -205,7 +226,10 @@ describe LogStash::Filters::Stanag4778 do
         )
         filt.register
 
-        event = LogStash::Event.new("message" => JSON.generate(signed_bdo))
+        full_doc = rsa_doc_body.dup
+        full_doc["bdo"] = signed_bdo
+
+        event = LogStash::Event.new("message" => JSON.generate(full_doc))
         filt.filter(event)
 
         expect(event.get("tags")).to include("_stanag4778_invalid")
@@ -260,7 +284,7 @@ describe LogStash::Filters::Stanag4778 do
 
         expect(event.get("tags")).to include("_stanag4778_invalid")
         expect(event.get("stanag")["valid"]).to be false
-        expect(event.get("stanag")["errors"].join).to match(/PROHIBITED|forbidden/)
+        expect(event.get("stanag")["errors"].join).to match(/PROHIBITED/)
       end
 
       it "detects XML tampering" do

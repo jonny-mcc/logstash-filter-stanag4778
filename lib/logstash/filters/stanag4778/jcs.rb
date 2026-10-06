@@ -1,5 +1,8 @@
 # encoding: utf-8
+require "java"
 require "json"
+
+java_import java.lang.Double
 
 module LogStash
   module Filters
@@ -51,8 +54,6 @@ module LogStash
         end
 
         def self.serialize_string(str)
-          # RFC 8785 section 3.2.2.2: string serialization escapes quotation mark, reverse solidus,
-          # and control characters U+0000 through U+001F using \u00xx.
           out = ['"']
           str.to_s.each_char do |ch|
             cp = ch.ord
@@ -81,23 +82,48 @@ module LogStash
           out.join
         end
 
+        # RFC 8785 Section 3.2.2.3: Number serialization conformant with ECMAScript (ES6) 7.1.12.1 ToString
         def self.serialize_float(num)
           return "0" if num.zero?
           if num.infinite? || num.nan?
             raise ArgumentError, "In RFC 8785 JCS, Infinity and NaN are not permitted"
           end
 
-          # Format in ES6/ECMAScript format (scientific notation only for < 1e-6 or >= 1e21)
-          # In Ruby, if num == num.to_i and fits, output integer
-          if num == num.to_i && num.abs < 1e21
+          # Handle negative zero (-0.0) -> "0"
+          if num.zero? && 1.0 / num < 0
+            return "0"
+          end
+
+          # If it has an exact integer representation within (-1e21, 1e21)
+          if num == num.to_i && num.abs < 1e21 && num.abs >= 1e-6
             return num.to_i.to_s
           end
 
-          # Use JSON generator's float formatting or Ruby's float string representation
-          str = num.to_s
-          # Ensure scientific notation exponent uses uppercase 'e' with '+' for positive if standard
-          # Ruby float formatting matches ES6 closely for standard numbers
-          str
+          # Use Java Double.toString for standard IEEE-754 representation, then apply ECMAScript exponential rules
+          # In Java: Double.toString(1e21) is "1.0E21", in ES6: "1e+21"
+          # In Java: Double.toString(1e-7) is "1.0E-7", in ES6: "1e-7"
+          j_str = java.lang.Double.toString(num.to_f)
+
+          # Format Java scientific notation to ECMAScript standard:
+          # Java: "1.0E21" -> "1e+21"
+          # Java: "1.0E-7" -> "1e-7"
+          if j_str =~ /\A(-?\d+(?:\.\d+)?)E([+-]?\d+)\z/
+            mantissa = $1
+            exp = $2.to_i
+
+            # Remove trailing .0 from mantissa if present: 1.0 -> 1, but 1.25 -> 1.25
+            mantissa = mantissa.sub(/\.0\z/, "") if mantissa.end_with?(".0")
+
+            exp_str = exp >= 0 ? "+#{exp}" : "#{exp}"
+            return "#{mantissa}e#{exp_str}"
+          end
+
+          # Non-exponential Java format (e.g. "123.45" or "123.0")
+          if j_str.end_with?(".0")
+            j_str[0..-3]
+          else
+            j_str
+          end
         end
       end
     end

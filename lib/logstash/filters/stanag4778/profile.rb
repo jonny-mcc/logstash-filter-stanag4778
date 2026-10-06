@@ -117,6 +117,27 @@ module LogStash
           "PS512" => :optional
         }.freeze
 
+        # Recognized JWS Header Parameters compliant with ADatP-4778.7 Table 7
+        JWS_UNDERSTOOD_HEADER_PARAMS = [
+          "alg", "iat", "jku", "jwk", "kid", "x5u", "x5c", "x5t", "x5t#S256", "typ", "cty", "crit"
+        ].freeze
+
+        # Mapping of JWS alg to required reference hash algorithm
+        JWS_ALG_TO_HASH = {
+          "HS256" => "sha-256",
+          "HS384" => "sha-384",
+          "HS512" => "sha-512",
+          "RS256" => "sha-256",
+          "RS384" => "sha-384",
+          "RS512" => "sha-512",
+          "ES256" => "sha-256",
+          "ES384" => "sha-384",
+          "ES512" => "sha-512",
+          "PS256" => "sha-256",
+          "PS384" => "sha-384",
+          "PS512" => "sha-512"
+        }.freeze
+
         # Java Algorithm Mappings for JWS
         JWS_JAVA_SIGNATURE_ALGORITHMS = {
           "RS256" => "SHA256withRSA",

@@ -29,6 +29,15 @@ class LogStash::Filters::Stanag4778 < LogStash::Filters::Base
   # Array of paths to pinned X.509 signer certificates (PEM)
   config :trusted_certificates, :validate => :array, :default => []
 
+  # Certificate revocation check mode: "none", "crl", or "ocsp"
+  config :revocation_mode, :validate => ["none", "crl", "ocsp"], :default => "none"
+
+  # Required Extended Key Usage OIDs for signer certificates (e.g. ["1.3.6.1.5.5.7.3.3"])
+  config :required_extended_key_usage, :validate => :array, :default => []
+
+  # Whitelist of allowed signer subject regular expressions
+  config :allowed_signer_subjects, :validate => :array, :default => []
+
   # Path to JWKS JSON file for JWS key resolution
   config :jwks_path, :validate => :path
 
@@ -59,6 +68,18 @@ class LogStash::Filters::Stanag4778 < LogStash::Filters::Base
   # Max bytes to fetch for external reference
   config :fetch_max_bytes, :validate => :number, :default => 10_485_760
 
+  # Allow fetching from private / loopback IP addresses (for test environments)
+  config :fetch_allow_private_addresses, :validate => :boolean, :default => false
+
+  # Max total memory in bytes for fetcher cache
+  config :fetch_cache_max_bytes, :validate => :number, :default => 52_428_800
+
+  # Cache time to live in seconds
+  config :fetch_cache_ttl, :validate => :number, :default => 300
+
+  # Path to custom CA bundle for external HTTPS fetching
+  config :fetch_ssl_certificate_authorities, :validate => :path
+
   # Extract STANAG 4774 confidentiality labels into target
   config :extract_labels, :validate => :boolean, :default => true
 
@@ -84,14 +105,21 @@ class LogStash::Filters::Stanag4778 < LogStash::Filters::Base
       ca_path: @ssl_certificate_authorities,
       trusted_certs: @trusted_certificates,
       jwks_path: @jwks_path,
-      hmac_keys: @hmac_keys
+      hmac_keys: @hmac_keys,
+      revocation_mode: @revocation_mode,
+      required_eku: @required_extended_key_usage,
+      allowed_subjects: @allowed_signer_subjects
     )
 
     @fetcher = LogStash::Filters::Stanag4778Module::Fetcher.new(
       enabled: @fetch_external_references,
       allowlist: @external_reference_allowlist,
       timeout_seconds: @fetch_timeout,
-      max_bytes: @fetch_max_bytes
+      max_bytes: @fetch_max_bytes,
+      allow_private: @fetch_allow_private_addresses,
+      cache_max_bytes: @fetch_cache_max_bytes,
+      cache_ttl: @fetch_cache_ttl,
+      ca_path: @fetch_ssl_certificate_authorities
     )
 
     @xml_verifier = LogStash::Filters::Stanag4778Module::XmlVerifier.new(

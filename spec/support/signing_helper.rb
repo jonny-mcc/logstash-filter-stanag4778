@@ -84,6 +84,24 @@ module SigningHelper
     raise "BC not present"
   end
 
+  class MockSignURIDereferencer
+    include javax.xml.crypto.URIDereferencer
+
+    def initialize(default_deref)
+      @default_deref = default_deref
+    end
+
+    def dereference(uri_ref, ctx)
+      uri_str = uri_ref.getURI
+      if uri_str.nil? || uri_str.empty? || uri_str.start_with?("#")
+        @default_deref.dereference(uri_ref, ctx)
+      else
+        dummy_stream = ByteArrayInputStream.new("mock external data".to_java_bytes)
+        javax.xml.crypto.OctetStreamData.new(dummy_stream, uri_str, "application/octet-stream")
+      end
+    end
+  end
+
   # Sign an XML string containing mb:BindingInformation using DOM XMLSignatureFactory
   def self.sign_xml(xml_string, keypair, cert: nil, hmac_key_name: nil, hmac_secret: nil, alg: "rsa-sha256")
     dbf = DocumentBuilderFactory.newInstance
@@ -133,6 +151,9 @@ module SigningHelper
         refs << fac.newReference("", dm, [env_transform], nil, nil)
       elsif uri.start_with?("#")
         refs << fac.newReference(uri, dm, transforms, nil, nil)
+      elsif !uri.empty?
+        # Detached external reference
+        refs << fac.newReference(uri, dm, nil, nil, nil)
       end
     end
 
@@ -184,6 +205,8 @@ module SigningHelper
                   else
                     javax.xml.crypto.dsig.dom.DOMSignContext.new(keypair.getPrivate, bdo, bdo.getFirstChild)
                   end
+
+    val_context.setURIDereferencer(MockSignURIDereferencer.new(fac.getURIDereferencer))
 
     # Register IDs in context
     val_context.putNamespacePrefix("http://www.w3.org/2000/09/xmldsig#", "ds")
@@ -251,6 +274,92 @@ module SigningHelper
     bdi = "#{hdr_b64}.#{pay_b64}.#{sig_b64}"
     {
       "typ" => bdo_typ,
+      "prf" => "urn:nato:stanag:4778:profile:example:json:1:0",
+      "bdis" => [{ "bdi" => bdi }]
+    }
+  end
+
+  # Helper to convert an RSA or EC public key to JWK Hash
+  def self.public_key_to_jwk(public_key, kid: nil)
+    if public_key.getAlgorithm == "RSA"
+      spec = java.security.KeyFactory.getInstance("RSA").getKeySpec(public_key, java.security.spec.RSAPublicKeySpec.java_class)
+      mod_val = spec.getModulus
+      mod_bi = mod_val.is_a?(java.math.BigInteger) ? mod_val : java.math.BigInteger.new(mod_val.to_s)
+      n_bytes = mod_bi.toByteArray
+      n_bytes = n_bytes[1..-1] if n_bytes[0] == 0
+      n_b64 = Base64.urlsafe_encode64(String.from_java_bytes(n_bytes)).tr("=", "")
+
+      exp_val = spec.getPublicExponent
+      exp_bi = exp_val.is_a?(java.math.BigInteger) ? exp_val : java.math.BigInteger.new(exp_val.to_s)
+      e_bytes = exp_bi.toByteArray
+      e_bytes = e_bytes[1..-1] if e_bytes[0] == 0
+      e_b64 = Base64.urlsafe_encode64(String.from_java_bytes(e_bytes)).tr("=", "")
+
+      jwk = { "kty" => "RSA", "n" => n_b64, "e" => e_b64 }
+      jwk["kid"] = kid if kid
+      jwk
+    elsif public_key.getAlgorithm == "EC"
+      spec = java.security.KeyFactory.getInstance("EC").getKeySpec(public_key, java.security.spec.ECPublicKeySpec.java_class)
+      w = spec.getW
+      x_val = w.getAffineX
+      x_bi = x_val.is_a?(java.math.BigInteger) ? x_val : java.math.BigInteger.new(x_val.to_s)
+      x_bytes = x_bi.toByteArray
+      x_bytes = x_bytes[1..-1] if x_bytes[0] == 0
+
+      y_val = w.getAffineY
+      y_bi = y_val.is_a?(java.math.BigInteger) ? y_val : java.math.BigInteger.new(y_val.to_s)
+      y_bytes = y_bi.toByteArray
+      y_bytes = y_bytes[1..-1] if y_bytes[0] == 0
+
+      jwk = {
+        "kty" => "EC",
+        "crv" => "P-256",
+        "x" => Base64.urlsafe_encode64(String.from_java_bytes(x_bytes)).tr("=", ""),
+        "y" => Base64.urlsafe_encode64(String.from_java_bytes(y_bytes)).tr("=", "")
+      }
+      jwk["kid"] = kid if kid
+      jwk
+    end
+  end
+
+  # Sign JWS with arbitrary custom header overrides
+  def self.sign_jws_raw(header, payload_obj, keypair: nil, hmac_secret: nil)
+    hdr_b64 = Base64.urlsafe_encode64(JSON.generate(header)).tr("=", "")
+    pay_b64 = Base64.urlsafe_encode64(JSON.generate(payload_obj)).tr("=", "")
+    signing_input = "#{hdr_b64}.#{pay_b64}".encode("ASCII-8BIT")
+
+    alg = header["alg"]
+    sig_b64 = if alg.nil? || alg == "none"
+                ""
+              elsif alg.start_with?("HS")
+                mac_alg = case alg
+                          when "HS256" then "HmacSHA256"
+                          when "HS384" then "HmacSHA384"
+                          when "HS512" then "HmacSHA512"
+                          end
+                mac = Mac.getInstance(mac_alg)
+                mac.init(SecretKeySpec.new(hmac_secret.to_java_bytes, mac_alg))
+                digest = mac.doFinal(signing_input.to_java_bytes)
+                Base64.urlsafe_encode64(String.from_java_bytes(digest)).tr("=", "")
+              elsif alg.start_with?("RS") || alg.start_with?("ES")
+                j_alg = case alg
+                        when "RS256" then "SHA256withRSA"
+                        when "RS384" then "SHA384withRSA"
+                        when "RS512" then "SHA512withRSA"
+                        when "ES256" then "SHA256withECDSAinP1363Format"
+                        when "ES384" then "SHA384withECDSAinP1363Format"
+                        when "ES512" then "SHA512withECDSAinP1363Format"
+                        end
+                signer = Signature.getInstance(j_alg)
+                signer.initSign(keypair.getPrivate)
+                signer.update(signing_input.to_java_bytes)
+                sig_bytes = signer.sign
+                Base64.urlsafe_encode64(String.from_java_bytes(sig_bytes)).tr("=", "")
+              end
+
+    bdi = "#{hdr_b64}.#{pay_b64}.#{sig_b64}"
+    {
+      "typ" => "urn:nato:stanag:4778:bindinginformation:1:0",
       "prf" => "urn:nato:stanag:4778:profile:example:json:1:0",
       "bdis" => [{ "bdi" => bdi }]
     }
